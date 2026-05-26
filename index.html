@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Graphics Pipeline Playground</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #121214;
+            color: #e1e1e6;
+            font-family: system-ui, -apple-system, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+        h1 {
+            margin-bottom: 4px;
+            font-size: 1.8rem;
+        }
+        p {
+            color: #8f8f9d;
+            margin-bottom: 24px;
+        }
+        canvas {
+            background-color: #09090a;
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+            border-radius: 8px;
+            border: 1px solid #29292e;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>3D Graphics Pipeline</h1>
+    <p>A lightweight software renderer built using raw HTML5 Canvas, CSS, and JS.</p>
+
+    <canvas id="pipelineCanvas" width="800" height="500"></canvas>
+
+    <script>
+        const canvas = document.getElementById("pipelineCanvas");
+        const ctx = canvas.getContext("2d");
+
+        // Keep track of our global animation step
+        let timeStep = 0;
+
+        // ============================================================================
+        // [STAGE 1]: THE APPLICATION STAGE
+        // ============================================================================
+        // This is where our app lives. It runs entirely on the CPU. Here, we setup
+        // our world data, track game/animation states, and handle logic. 
+        // We define everything in "local space" (raw 3D points relative to their own center).
+        // ============================================================================
+        
+        // --- Object 1: 3D Cube ---
+        const cubeVertices = [
+            {x: -1, y: -1, z: -1}, {x: 1, y: -1, z: -1}, {x: 1, y: 1, z: -1}, {x: -1, y: 1, z: -1},
+            {x: -1, y: -1, z: 1},  {x: 1, y: -1, z: 1},  {x: 1, y: 1, z: 1},  {x: -1, y: 1, z: 1}
+        ];
+        // Connect the dots to form 3D faces
+        const cubeFaces = [
+            { indices: [0, 1, 2, 3], color: "#ff5555" }, // Front
+            { indices: [1, 5, 6, 2], color: "#50fa7b" }, // Right
+            { indices: [5, 4, 7, 6], color: "#8be9fd" }, // Back
+            { indices: [4, 0, 3, 7], color: "#f1fa8c" }, // Left
+            { indices: [4, 5, 1, 0], color: "#ff79c6" }, // Top
+            { indices: [3, 2, 6, 7], color: "#bd93f9" }  // Bottom
+        ];
+
+        // --- Object 2: 3D Pyramid ---
+        const pyramidVertices = [
+            {x: 0, y: -1.2, z: 0},     // Tip of the pyramid
+            {x: -1, y: 1, z: -1},     // Base: Front-Left
+            {x: 1, y: 1, z: -1},      // Base: Front-Right
+            {x: 1, y: 1, z: 1},       // Base: Back-Right
+            {x: -1, y: 1, z: 1}       // Base: Back-Left
+        ];
+        const pyramidFaces = [
+            { indices: [0, 1, 2], color: "#ffb86c" },    // Front Face
+            { indices: [0, 2, 3], color: "#ff79c6" },    // Right Face
+            { indices: [0, 3, 4], color: "#50fa7b" },    // Back Face
+            { indices: [0, 4, 1], color: "#f1fa8c" },    // Left Face
+            { indices: [1, 4, 3, 2], color: "#6272a4" }   // Bottom Base
+        ];
+
+        // Camera configurations for our viewport math
+        const camera = {
+            fov: 420, // Field of View (acts like a lens zoom)
+            centerX: canvas.width / 2,  // Map center X to center of the canvas
+            centerY: canvas.height / 2  // Map center Y to center of the canvas
+        };
+
+        // This is our heart-beat rendering loop
+        function frameUpdate() {
+            // Move the animation forward slightly every frame
+            timeStep += 0.015;
+
+            // Wipe the slate clean before drawing the new positions
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // This queue acts as a makeshift depth-buffer (Z-buffer).
+            // Because Canvas doesn't do 3D depth sorting out of the box, we have to collect
+            // all faces across all objects, sort them by distance, and draw back-to-front.
+            let geometryToRender = [];
+
+            // Run object 1 (Cube) through the math pipeline and dump it into our render queue
+            processObjectGeometry(cubeVertices, cubeFaces, -180, 0, timeStep, timeStep * 0.5, geometryToRender);
+
+            // Run object 2 (Pyramid) through the math pipeline as well
+            processObjectGeometry(pyramidVertices, pyramidFaces, 180, 20, -timeStep, timeStep * 0.7, geometryToRender);
+
+            // --- The Painter's Algorithm ---
+            // Sort every face in the scene so that things furthest away are drawn FIRST.
+            // This stops things in the back from accidentally clipping through things in the front.
+            geometryToRender.sort((faceA, faceB) => faceB.avgZ - faceA.avgZ);
+
+            // Now hand the sorted geometry over to be painted onto the screen
+            drawSceneToPixels(geometryToRender);
+
+            // Keep the loop going smoothly
+            requestAnimationFrame(frameUpdate);
+        }
+
+
+        // ============================================================================
+        // [STAGE 2]: THE GEOMETRY STAGE
+        // ============================================================================
+        // This is where the heavy math happens. We take the local 3D coordinates, 
+        // spin them using trigonometry, move them into world position, and apply perspective 
+        // division to squash that 3D space down onto a flat 2D viewport.
+        // ============================================================================
+        function processObjectGeometry(vertices, faces, offsetX, offsetY, rotX, rotY, queue) {
+            let spaceCoordinates = [];
+
+            // 1. Position & Spin Transformations
+            for (let i = 0; i < vertices.length; i++) {
+                let p = vertices[i];
+
+                // Spin around Y axis
+                let x1 = p.x * Math.cos(rotY) - p.z * Math.sin(rotY);
+                let z1 = p.x * Math.sin(rotY) + p.z * Math.cos(rotY);
+
+                // Spin around X axis
+                let y2 = p.y * Math.cos(rotX) - z1 * Math.sin(rotX);
+                let z2 = p.y * Math.sin(rotX) + z1 * Math.cos(rotX);
+
+                // Scale the object up slightly, offset its position, and push it 
+                // forward along the Z axis so it isn't sitting directly on top of the camera.
+                let worldX = x1 * 80 + offsetX; 
+                let worldY = y2 * 80 + offsetY;
+                let worldZ = z2 * 80 + 320; 
+
+                // 2. Perspective Projection Divide
+                // Traditional 3D math: objects get smaller the further they move away (as Z increases).
+                let perspectiveScale = camera.fov / worldZ;
+                let flatScreenX = worldX * perspectiveScale + camera.centerX;
+                let flatScreenY = worldY * perspectiveScale + camera.centerY;
+
+                spaceCoordinates.push({ x: flatScreenX, y: flatScreenY, z: worldZ });
+            }
+
+            // 3. Assemble Faces & Culling
+            for (let i = 0; i < faces.length; i++) {
+                let face = faces[i];
+                let facePoints = [];
+                let totalZ = 0;
+
+                // Look up transformed coordinates for this face
+                for (let j = 0; j < face.indices.length; j++) {
+                    let vertexIndex = face.indices[j];
+                    facePoints.push(spaceCoordinates[vertexIndex]);
+                    totalZ += spaceCoordinates[vertexIndex].z;
+                }
+
+                // Average depth helps us know where this face stands relative to everything else
+                let averageDepth = totalZ / face.indices.length;
+
+                // --- Backface Culling Optimization ---
+                // If a face is turning away from the camera, why waste CPU power drawing it?
+                // We check the winding order of the points to skip drawing hidden backsides.
+                if (isFaceVisible(facePoints)) {
+                    queue.push({
+                        points: facePoints,
+                        color: face.color,
+                        avgZ: averageDepth
+                    });
+                }
+            }
+        }
+
+        // Quick vector cross-product trick to see if the polygon vertices are winding
+        // clockwise or counter-clockwise from our point of view.
+        function isFaceVisible(pts) {
+            if (pts.length < 3) return false;
+            return ((pts[1].x - pts[0].x) * (pts[2].y - pts[0].y) - 
+                    (pts[1].y - pts[0].y) * (pts[2].x - pts[0].x)) > 0;
+        }
+
+
+        // ============================================================================
+        // [STAGE 3]: THE RASTERIZATION STAGE
+        // ============================================================================
+        // The math is done; now we turn abstract geometric data into real colored 
+        // pixels on your monitor. Canvas handles the heavy lifting of filling in 
+        // the pixel bounds, acting as our hardware frame buffer.
+        // ============================================================================
+        function drawSceneToPixels(queue) {
+            for (let i = 0; i < queue.length; i++) {
+                let renderingFace = queue[i];
+
+                ctx.beginPath();
+                // Move virtual pen to our first flat 2D point
+                ctx.moveTo(renderingFace.points[0].x, renderingFace.points[0].y);
+
+                // Draw lines connecting the rest of the shape's vector bounds
+                for (let j = 1; j < renderingFace.points.length; j++) {
+                    ctx.lineTo(renderingFace.points[j].x, renderingFace.points[j].y);
+                }
+                ctx.closePath();
+
+                // Fill the bound area with color (This calculates pixel values inside the lines)
+                ctx.fillStyle = renderingFace.color;
+                ctx.fill();
+
+                // Add a subtle dark wireframe border to give the objects structure and definition
+                ctx.strokeStyle = "rgba(18, 18, 20, 0.4)";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+
+        // Kick off the whole engine loop
+        frameUpdate();
+    </script>
+</body>
+</html>
